@@ -1,49 +1,80 @@
-import sys
+import os
 import subprocess
 import threading
-import time
-import os
-import streamlit.components.v1 as components
+import streamlit as st
+import gdown
 
 # ===============================
-# Auto install dependencies
+# STREAMLIT CONFIG
 # ===============================
-def install(package):
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+st.set_page_config(
+    page_title="YT Live Playlist Streamer",
+    page_icon="📺",
+    layout="wide"
+)
 
-try:
-    import streamlit as st
-except ImportError:
-    install("streamlit")
-    import streamlit as st
-
-try:
-    import gdown
-except ImportError:
-    install("gdown")
-    import gdown
-
+st.title("YouTube Live – Google Drive Playlist Streamer")
 
 # ===============================
-# Download video dari Google Drive
+# SESSION STATE INIT
 # ===============================
-def download_from_gdrive(file_id, output):
-    if not os.path.exists(output):
-        url = f"https://drive.google.com/uc?id={file_id}"
-        gdown.download(url, output, quiet=False)
-    return output
+if "logs" not in st.session_state:
+    st.session_state.logs = []
+
+if "ffmpeg_running" not in st.session_state:
+    st.session_state.ffmpeg_running = False
 
 
 # ===============================
-# FFmpeg Streaming
+# LOG CALLBACK (THREAD SAFE)
 # ===============================
-def run_ffmpeg(video_path, stream_key, is_shorts, log_callback):
+def log_callback(msg):
+    st.session_state.logs.append(msg)
+
+
+# ===============================
+# GOOGLE DRIVE DOWNLOAD
+# ===============================
+def download_drive_video(url, filename):
+    file_id = url.split("/d/")[1].split("/")[0]
+    if not os.path.exists(filename):
+        gdown.download(
+            f"https://drive.google.com/uc?id={file_id}",
+            filename,
+            quiet=False
+        )
+    return filename
+
+
+# ===============================
+# BUILD PLAYLIST
+# ===============================
+def build_playlist(video_files):
+    playlist = "playlist.txt"
+    with open(playlist, "w") as f:
+        for v in video_files:
+            f.write(f"file '{os.path.abspath(v)}'\n")
+    return playlist
+
+
+# ===============================
+# FFMPEG THREAD
+# ===============================
+def run_ffmpeg_playlist(playlist, stream_key, is_shorts):
+    log_callback("Menjalankan FFmpeg playlist...")
     output_url = f"rtmp://a.rtmp.youtube.com/live2/{stream_key}"
-    scale = ["-vf", "scale=720:1280"] if is_shorts else []
+
+    scale = []
+    if is_shorts:
+        scale = ["-vf", "scale=720:1280"]
 
     cmd = [
-        "ffmpeg", "-re", "-stream_loop", "-1",
-        "-i", video_path,
+        "ffmpeg",
+        "-re",
+        "-stream_loop", "-1",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", playlist,
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-b:v", "2500k",
@@ -53,122 +84,85 @@ def run_ffmpeg(video_path, stream_key, is_shorts, log_callback):
         "-keyint_min", "60",
         "-c:a", "aac",
         "-b:a", "128k",
-        "-f", "flv",
         *scale,
+        "-f", "flv",
         output_url
     ]
 
-    log_callback("Menjalankan FFmpeg:")
     log_callback(" ".join(cmd))
 
-    try:
-        process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-        )
-        for line in process.stdout:
-            log_callback(line.strip())
-        process.wait()
-    except Exception as e:
-        log_callback(f"Error: {e}")
-    finally:
-        log_callback("Streaming dihentikan.")
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True
+    )
+
+    for line in process.stdout:
+        log_callback(line.strip())
+
+    log_callback("FFmpeg berhenti.")
+    st.session_state.ffmpeg_running = False
 
 
 # ===============================
-# Streamlit UI
+# UI – PLAYLIST INPUT
 # ===============================
-def main():
-    st.set_page_config(
-        page_title="Streaming YT by didinchy",
-        page_icon="📡",
-        layout="wide"
-    )
+st.subheader("Playlist Google Drive")
+st.caption("1 link Google Drive per baris (MP4 H264 + AAC)")
 
-    st.title("Live Streaming YouTube (Google Drive Source)")
+drive_links = st.text_area(
+    "Link Video",
+    height=200,
+    placeholder="https://drive.google.com/file/d/XXXXX/view\nhttps://drive.google.com/file/d/YYYYY/view"
+)
 
-    # ===============================
-    # Iklan
-    # ===============================
-    show_ads = st.checkbox("Tampilkan Iklan", value=True)
-    if show_ads:
-        components.html(
-            """
-            <div style="background:#f0f2f6;padding:20px;border-radius:10px;text-align:center">
-                <script type='text/javascript'
-                        src='//pl26562103.profitableratecpm.com/28/f9/95/28f9954a1d5bbf4924abe123c76a68d2.js'>
-                </script>
-                <p style="color:#888">Iklan Sponsor</p>
-            </div>
-            """,
-            height=250
-        )
+if st.button("⬇ Download & Buat Playlist"):
+    st.session_state.logs.clear()
+    links = [l.strip() for l in drive_links.splitlines() if l.strip()]
+    videos = []
 
-    # ===============================
-    # Google Drive Video
-    # ===============================
-    st.subheader("Sumber Video Google Drive")
+    for i, link in enumerate(links):
+        filename = f"video_{i+1}.mp4"
+        log_callback(f"Download {filename}")
+        download_drive_video(link, filename)
+        videos.append(filename)
 
-    gdrive_url = st.text_input(
-        "Link Google Drive",
-        value="https://drive.google.com/file/d/1IyJ_NPHRUAIXTRl9loEp8W1yAhylHP1K/view?usp=sharing"
-    )
+    playlist = build_playlist(videos)
+    log_callback("Playlist siap: playlist.txt")
+    st.success("Playlist berhasil dibuat!")
 
-    output_video = "drive_video.mp4"
+# ===============================
+# STREAM SETTINGS
+# ===============================
+st.subheader("Streaming Settings")
 
-    video_path = None
-    if st.button("Download Video dari Drive"):
-        try:
-            file_id = gdrive_url.split("/d/")[1].split("/")[0]
-            with st.spinner("Mengunduh video dari Google Drive..."):
-                video_path = download_from_gdrive(file_id, output_video)
-            st.success("Video berhasil diunduh!")
-        except Exception as e:
-            st.error(f"Gagal download: {e}")
+stream_key = st.text_input("YouTube Stream Key", type="password")
+is_shorts = st.checkbox("Mode Shorts (720x1280)")
 
-    if os.path.exists(output_video):
-        video_path = output_video
-        st.video(video_path)
+col1, col2 = st.columns(2)
 
-    # ===============================
-    # Streaming Settings
-    # ===============================
-    st.subheader("Pengaturan Streaming")
+with col1:
+    if st.button("▶ START STREAMING"):
+        if not os.path.exists("playlist.txt") or not stream_key:
+            st.error("Playlist atau Stream Key belum ada!")
+        elif not st.session_state.ffmpeg_running:
+            st.session_state.ffmpeg_running = True
+            threading.Thread(
+                target=run_ffmpeg_playlist,
+                args=("playlist.txt", stream_key, is_shorts),
+                daemon=True
+            ).start()
+            st.success("Streaming dimulai!")
 
-    stream_key = st.text_input("Stream Key YouTube", type="password")
-    is_shorts = st.checkbox("Mode Shorts (720x1280)")
+with col2:
+    if st.button("⛔ STOP STREAMING"):
+        os.system("pkill ffmpeg")
+        st.session_state.ffmpeg_running = False
+        st.warning("Streaming dihentikan.")
 
-    log_placeholder = st.empty()
-    logs = []
-
-    def log_callback(msg):
-        logs.append(msg)
-        log_placeholder.text("\n".join(logs[-20:]))
-
-    if "ffmpeg_thread" not in st.session_state:
-        st.session_state.ffmpeg_thread = None
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        if st.button("▶ Jalankan Streaming"):
-            if not video_path or not stream_key:
-                st.error("Video dan Stream Key wajib diisi!")
-            else:
-                st.session_state.ffmpeg_thread = threading.Thread(
-                    target=run_ffmpeg,
-                    args=(video_path, stream_key, is_shorts, log_callback),
-                    daemon=True
-                )
-                st.session_state.ffmpeg_thread.start()
-                st.success("Streaming dimulai!")
-
-    with col2:
-        if st.button("⛔ Stop Streaming"):
-            os.system("pkill ffmpeg")
-            st.warning("Streaming dihentikan!")
-
-    log_placeholder.text("\n".join(logs[-20:]))
-
-
-if __name__ == "__main__":
-    main()
+# ===============================
+# LOG VIEW
+# ===============================
+st.subheader("Log FFmpeg")
+st.text("\n".join(st.session_state.logs[-25:]))
