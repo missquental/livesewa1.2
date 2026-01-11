@@ -1,6 +1,7 @@
 import os
 import subprocess
 import threading
+import queue
 import streamlit as st
 import gdown
 
@@ -16,20 +17,18 @@ st.set_page_config(
 st.title("YouTube Live – Google Drive Playlist Streamer")
 
 # ===============================
-# SESSION STATE INIT
+# GLOBAL LOG QUEUE (THREAD SAFE)
+# ===============================
+log_queue = queue.Queue()
+
+# ===============================
+# SESSION STATE INIT (MAIN THREAD ONLY)
 # ===============================
 if "logs" not in st.session_state:
     st.session_state.logs = []
 
 if "ffmpeg_running" not in st.session_state:
     st.session_state.ffmpeg_running = False
-
-
-# ===============================
-# LOG CALLBACK (THREAD SAFE)
-# ===============================
-def log_callback(msg):
-    st.session_state.logs.append(msg)
 
 
 # ===============================
@@ -58,10 +57,11 @@ def build_playlist(video_files):
 
 
 # ===============================
-# FFMPEG THREAD
+# FFMPEG THREAD (NO STREAMLIT HERE!)
 # ===============================
 def run_ffmpeg_playlist(playlist, stream_key, is_shorts):
-    log_callback("Menjalankan FFmpeg playlist...")
+    log_queue.put("Menjalankan FFmpeg playlist...")
+
     output_url = f"rtmp://a.rtmp.youtube.com/live2/{stream_key}"
 
     scale = []
@@ -89,7 +89,7 @@ def run_ffmpeg_playlist(playlist, stream_key, is_shorts):
         output_url
     ]
 
-    log_callback(" ".join(cmd))
+    log_queue.put(" ".join(cmd))
 
     process = subprocess.Popen(
         cmd,
@@ -99,17 +99,16 @@ def run_ffmpeg_playlist(playlist, stream_key, is_shorts):
     )
 
     for line in process.stdout:
-        log_callback(line.strip())
+        log_queue.put(line.strip())
 
-    log_callback("FFmpeg berhenti.")
-    st.session_state.ffmpeg_running = False
+    log_queue.put("FFmpeg berhenti.")
 
 
 # ===============================
 # UI – PLAYLIST INPUT
 # ===============================
 st.subheader("Playlist Google Drive")
-st.caption("1 link Google Drive per baris (MP4 H264 + AAC)")
+st.caption("1 link Google Drive per baris")
 
 drive_links = st.text_area(
     "Link Video",
@@ -119,17 +118,17 @@ drive_links = st.text_area(
 
 if st.button("⬇ Download & Buat Playlist"):
     st.session_state.logs.clear()
+
     links = [l.strip() for l in drive_links.splitlines() if l.strip()]
     videos = []
 
     for i, link in enumerate(links):
         filename = f"video_{i+1}.mp4"
-        log_callback(f"Download {filename}")
+        st.session_state.logs.append(f"Download {filename}")
         download_drive_video(link, filename)
         videos.append(filename)
 
-    playlist = build_playlist(videos)
-    log_callback("Playlist siap: playlist.txt")
+    build_playlist(videos)
     st.success("Playlist berhasil dibuat!")
 
 # ===============================
@@ -145,7 +144,7 @@ col1, col2 = st.columns(2)
 with col1:
     if st.button("▶ START STREAMING"):
         if not os.path.exists("playlist.txt") or not stream_key:
-            st.error("Playlist atau Stream Key belum ada!")
+            st.error("Playlist atau Stream Key belum siap!")
         elif not st.session_state.ffmpeg_running:
             st.session_state.ffmpeg_running = True
             threading.Thread(
@@ -162,7 +161,13 @@ with col2:
         st.warning("Streaming dihentikan.")
 
 # ===============================
+# PULL LOG FROM QUEUE (MAIN THREAD)
+# ===============================
+while not log_queue.empty():
+    st.session_state.logs.append(log_queue.get())
+
+# ===============================
 # LOG VIEW
 # ===============================
 st.subheader("Log FFmpeg")
-st.text("\n".join(st.session_state.logs[-25:]))
+st.text("\n".join(st.session_state.logs[-30:]))
